@@ -1,0 +1,283 @@
+Arduino连接ESP8266透传设置代码：
+/**
+ *ESP8266透传自动设置程序（固件版本v1.0+）
+ *功能：自动设置ESP8266进入透传模式，并重启自动连接贝壳物联平台。
+ *By 贝壳物联 2016.3.7
+ *贝壳物联：http://www.bigiot.net
+#include <SoftwareSerial.h>
+SoftwareSerial mySerial(10, 11); //设置模拟串口针脚(RX, TX)
+String WiFiSSID = "Cyan1997";//填写路由器名称=======
+String WiFiPASSWORD = "09172858115";//填写WiFi密码===
+//==============================================
+int flag = 0;
+void setup() {
+  Serial.begin(9600);
+  mySerial.begin(115200);
+}
+void loop() {
+  if(flag == 0){
+  Serial.println("waiting start");
+  //ESP8266通电启动等待
+  delay(10000);
+  Serial.println("setting start");
+  //如果是透传模式，退出透传
+  Serial.println("exit pass-through mode");
+  mySerial.print("+++");
+  delay(1000);
+  mySerial.print("AT\r\n");
+  delay(1000);
+  printmssage();
+  //关闭回显命令
+  mySerial.print("ATE0\r\n");
+  delay(1000);
+  printmssage();
+  //设置WiFi应用模式为兼容模式
+  Serial.println("choose station mode");
+  mySerial.print("AT+CWMODE=3\r\n");  
+  delay(2000);
+  printmssage();
+  //连接到无线路由器
+  Serial.println("connect wireless router");
+  mySerial.print("AT+CWJAP=\"");
+  mySerial.print(WiFiSSID);
+  mySerial.print("\",\"");
+  mySerial.print(WiFiPASSWORD);
+  mySerial.print("\"\r\n");
+  delay(20000);//此处需根据路由器连接速度设置delay的时间，可适当加长
+  printmssage();
+  //设置为单连接
+  mySerial.print("AT+CIPMUX=0\r\n");
+  delay(1000);
+  printmssage();
+  //设置模块传输模式为透传模式
+  Serial.println("choose pass-through mode");
+  mySerial.print("AT+CIPMODE=1\r\n");
+  delay(1000);
+  printmssage();
+  //连接贝壳物联服务器
+  Serial.println("connect bigiot.net and save translink");
+  mySerial.print("AT+SAVETRANSLINK=1,\"121.42.180.30\",8181,\"TCP\"\r\n");
+  delay(20000);//此处需根据网路连接速度设置delay的时间，可适当加长
+  printmssage();
+  //重启
+  Serial.println("restarting...");
+  mySerial.print("AT+RST\r\n");
+  flag=1;
+}
+  printmssage();
+}
+void printmssage(){
+  if (mySerial.available()){
+      Serial.println(mySerial.readStringUntil('\n'));
+  }
+}
+程序代码：
+#include <aJSON.h>
+#include <SPI.h>  
+#include <Wire.h>  
+String DEVICEID="3865"; // 你的设备编号   ==
+String  APIKEY="e2deb2cc1"; // 设备密码==
+String INPUTID1="3502";//接口ID==============
+String INPUTID2="3601";//接口ID==============
+String INPUTID3="3604";//接口ID==============
+//=======================================
+unsigned long lastCheckInTime = 0; //记录上次报到时间
+unsigned long lastUpdateTime = 0;//记录上次上传数据时间
+const unsigned long postingInterval = 40000; // 每隔40秒向服务器报到一次
+const unsigned long updateInterval = 5000; // 数据上传间隔时间8秒
+String inputString = "";//串口读取到的内容
+boolean stringComplete = false;//串口是否读取完毕
+boolean CONNECT = true; //连接状态
+boolean isCheckIn = false; //是否已经登录服务器
+char* parseJson(char *jsonString);//定义aJson字符串
+///****************************************************
+#define DHpin 7
+/////////////PM2.5
+#define PMpin 8
+float ratio = 0;
+float concentration = 0;
+unsigned long duration;
+unsigned long lowpulseoccupancy = 0;
+float valTemperature;//定义变量
+float valHumidity;//定义变量
+float dustDensity;
+byte dat[5];
+byte read_data()
+{
+  byte data;
+  for(int i=0; i<8; i++)
+  {
+    if(digitalRead(DHpin) == LOW)
+    {
+      while(digitalRead(DHpin) == LOW);   //等待 50us；
+        delayMicroseconds(30);   //判断高电平的持续时间，以判定数据是‘0’还是‘1’；
+      if(digitalRead(DHpin) == HIGH)
+        data |= (1<<(7-i));   //高位在前，低位在后；
+      while(digitalRead(DHpin) == HIGH);   //数据‘1’，等待下一位的接收；
+    }
+  }
+  return data;
+}
+void start_test()
+{
+  digitalWrite(DHpin,LOW);  //拉低总线，发开始信号；
+  delay(30);  //延时要大于 18ms，以便 DHT11 能检测到开始信号；
+  digitalWrite(DHpin,HIGH);
+  delayMicroseconds(40);  //等待 DHT11 响应；
+  pinMode(DHpin,INPUT);
+  while(digitalRead(DHpin) == HIGH);
+    delayMicroseconds(80);   //DHT11 发出响应，拉低总线 80us；
+  if(digitalRead(DHpin) == LOW);
+    delayMicroseconds(80);   //DHT11 拉高总线 80us 后开始发送数据；
+  for(int i=0;i<4;i++)    //接收温湿度数据，校验位不考虑；
+    dat[i] = read_data();
+  pinMode(DHpin,OUTPUT);
+  digitalWrite(DHpin,HIGH);   //发送完一次数据后释放总线，等待主机的下一次开始信号；
+}
+
+void update1(String did, String inputid, float value);
+
+void setup() {
+   Serial.begin(115200);//ESP 8266 工作波特率
+   Wire.begin();
+   pinMode(DHpin,OUTPUT);
+   pinMode(PMpin,INPUT);
+   Serial.println("Welcome!");
+   Serial.println("Dormitory environment monitoring system~");
+   delay(5000);
+}
+void loop() {
+   if(millis() - lastCheckInTime > postingInterval || lastCheckInTime==0) {
+     checkIn();
+   }
+     duration = pulseIn(PMpin, LOW);
+     lowpulseoccupancy = lowpulseoccupancy+duration;
+   if((millis() - lastUpdateTime >= updateInterval) && isCheckIn) 
+   {
+      ratio = lowpulseoccupancy/(updateInterval*10.0);  // Integer percentage 0=>10   
+     concentration = 1.1*pow(ratio,3)-3.8*pow(ratio,2)+520*ratio+0.62; // using spec sheet curve 
+  // PM2.5 calc
+     dustDensity = concentration/10000.0;
+     lowpulseoccupancy = 0;
+     start_test();
+     valTemperature = float(dat[2]);
+     valHumidity = float(dat[0]);
+      update1(DEVICEID,INPUTID1,valTemperature);
+      update1(DEVICEID,INPUTID2,valHumidity);
+      update1(DEVICEID,INPUTID3,dustDensity);
+   ///************************
+    }
+   serialEvent();
+     if (stringComplete) {
+       inputString.trim();
+       //Serial.println(inputString);
+       if(inputString=="CLOSED"){
+         Serial.println("connect closed!");
+         CONNECT=false;        
+       }else{
+         int len = inputString.length()+1;    
+         if(inputString.startsWith("{") && inputString.endsWith("}")){
+           char jsonString[len];
+           inputString.toCharArray(jsonString,len);
+           aJsonObject *msg = aJson.parse(jsonString);
+           processMessage(msg);
+           aJson.deleteItem(msg);          
+         }
+       }      
+       // clear the string:
+       inputString = "";
+       stringComplete = false;    
+   }
+}
+void checkIn() {//定时签到，防止离线
+   if (!CONNECT) {
+     isCheckIn = false;
+     Serial.print("+++");
+     delay(500);  
+     Serial.print("\r\n"); 
+     delay(1000);
+     Serial.print("AT+RST\r\n"); 
+     delay(6000);
+     CONNECT=true;
+     lastCheckInTime=0;
+   }
+   else{
+     Serial.print("{\"M\":\"checkin\",\"ID\":\"");
+     Serial.print(DEVICEID);
+     Serial.print("\",\"K\":\"");
+     Serial.print(APIKEY);
+     Serial.print("\"}\r\n");
+     lastCheckInTime = millis(); 
+     isCheckIn = true;  
+   }
+}
+void processMessage(aJsonObject *msg){
+   aJsonObject* method = aJson.getObjectItem(msg, "M");
+   aJsonObject* content = aJson.getObjectItem(msg, "C");     
+   aJsonObject* client_id = aJson.getObjectItem(msg, "ID");  
+   //char* st = aJson.print(msg);
+   if (!method) {
+     return;
+   }
+     //Serial.println(st); 
+     //free(st);
+     String M=method->valuestring;
+     String C=content->valuestring;
+     String F_C_ID=client_id->valuestring;
+     if(M=="say"){
+       if(C=="wendu"){
+          sayToClient(F_C_ID,String(valTemperature));
+        }
+        if(C=="shidu"){
+          sayToClient(F_C_ID,String(valHumidity));
+        }
+         if(C=="pm"){
+          sayToClient(F_C_ID,String(dustDensity));
+        }
+       }
+}
+void sayToClient(String client_id, String content){//命令回复
+   Serial.print("{\"M\":\"say\",\"ID\":\"");
+   Serial.print(client_id);
+   Serial.print("\",\"C\":\"");
+   Serial.print(content);
+   Serial.print("\"}\r\n");
+   lastCheckInTime = millis();
+}
+void serialEvent() {
+   while (Serial.available()) {
+     char inChar = (char)Serial.read();
+     inputString += inChar;
+     if (inChar == '\n') {
+       stringComplete = true;
+     }
+   }
+}
+//上报数据  拼接json
+void update1(String did, String inputid, float value){
+  Serial.print("{\"M\":\"update\",\"ID\":\"");
+  Serial.print(did);
+  Serial.print("\",\"V\":{\"");
+  Serial.print(inputid);
+  Serial.print("\":\"");
+  Serial.print(value);
+  Serial.println("\"}}");
+  lastCheckInTime = millis();
+  lastUpdateTime= millis(); 
+}
+//同时上传两个接口数据调用此函数
+void update2(String did, String inputid1, float value1, String inputid2, float value2){
+  Serial.print("{\"M\":\"update\",\"ID\":\"");
+  Serial.print(did);
+  Serial.print("\",\"V\":{\"");
+  Serial.print(inputid1);
+  Serial.print("\":\"");
+  Serial.print(value1);
+  Serial.print("\",\"");
+  Serial.print(inputid2);
+  Serial.print("\":\"");
+  Serial.print(value2);
+  Serial.println("\"}}");
+  lastCheckInTime = millis();
+  lastUpdateTime= millis(); 
+}
